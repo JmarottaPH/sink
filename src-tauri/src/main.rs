@@ -20,10 +20,11 @@ struct WebkitWorkaround {
 /// is what leaves the window half-drawn. KWin also rejects WebKit's DMABUF
 /// commits unless NVIDIA explicit sync is disabled.
 ///
-/// Other GPUs keep the previous workaround (DMABUF renderer off) so this does
-/// not change their startup.
-fn webkit_workaround(nvidia: bool) -> WebkitWorkaround {
-    if nvidia {
+/// Other GPUs, and NVIDIA on WebKitGTK older than 2.54, keep the previous
+/// workaround (DMABUF renderer off). 2.54 is the release that made the Skia
+/// compositor the default.
+fn webkit_workaround(nvidia: bool, skia_compositor: bool) -> WebkitWorkaround {
+    if nvidia && skia_compositor {
         WebkitWorkaround {
             disable_dmabuf: false,
             texture_mapper: true,
@@ -35,6 +36,21 @@ fn webkit_workaround(nvidia: bool) -> WebkitWorkaround {
             texture_mapper: false,
             disable_nvidia_explicit_sync: false,
         }
+    }
+}
+
+/// WebKitGTK 2.54 is the first stable release whose default compositor is Skia.
+fn skia_compositor_default(major: u32, minor: u32) -> bool {
+    major > 2 || (major == 2 && minor >= 54)
+}
+
+fn webkit_version() -> (u32, u32) {
+    // These only read the library version. They do not start the renderer.
+    unsafe {
+        (
+            webkit2gtk::ffi::webkit_get_major_version(),
+            webkit2gtk::ffi::webkit_get_minor_version(),
+        )
     }
 }
 
@@ -62,7 +78,13 @@ fn apply_webkit_workaround(workaround: WebkitWorkaround) {
 
 fn main() {
     #[cfg(target_os = "linux")]
-    apply_webkit_workaround(webkit_workaround(nvidia_module_loaded()));
+    {
+        let (major, minor) = webkit_version();
+        apply_webkit_workaround(webkit_workaround(
+            nvidia_module_loaded(),
+            skia_compositor_default(major, minor),
+        ));
+    }
 
     sink_lib::run()
 }
@@ -72,18 +94,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nvidia_uses_texture_mapper_without_disabling_dmabuf() {
-        let workaround = webkit_workaround(true);
+    fn nvidia_on_webkit_2_54_uses_texture_mapper_without_disabling_dmabuf() {
+        let workaround = webkit_workaround(true, true);
         assert!(!workaround.disable_dmabuf);
         assert!(workaround.texture_mapper);
         assert!(workaround.disable_nvidia_explicit_sync);
     }
 
     #[test]
-    fn other_gpus_still_disable_the_dmabuf_renderer() {
-        let workaround = webkit_workaround(false);
+    fn nvidia_on_older_webkit_keeps_the_dmabuf_workaround() {
+        let workaround = webkit_workaround(true, false);
         assert!(workaround.disable_dmabuf);
         assert!(!workaround.texture_mapper);
         assert!(!workaround.disable_nvidia_explicit_sync);
+    }
+
+    #[test]
+    fn other_gpus_still_disable_the_dmabuf_renderer() {
+        let workaround = webkit_workaround(false, true);
+        assert!(workaround.disable_dmabuf);
+        assert!(!workaround.texture_mapper);
+        assert!(!workaround.disable_nvidia_explicit_sync);
+    }
+
+    #[test]
+    fn skia_compositor_starts_at_webkit_2_54() {
+        assert!(!skia_compositor_default(2, 52));
+        assert!(skia_compositor_default(2, 54));
+        assert!(skia_compositor_default(3, 0));
     }
 }
